@@ -1,0 +1,782 @@
+package com.authorwjf;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.Map;
+import java.util.Timer;
+import java.util.TimerTask;
+
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpPost;
+import org.apache.http.impl.client.DefaultHttpClient;
+
+import com.authorwjf.R;
+import android.app.Activity;
+import android.content.Context;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorListener;
+import android.hardware.SensorManager;
+import android.media.AudioManager;
+import android.media.MediaPlayer;
+import android.os.AsyncTask;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.PowerManager;
+import android.os.Vibrator;
+import android.util.Log;
+import android.view.View;
+import android.view.View.OnClickListener;
+import android.widget.AnalogClock;
+import android.widget.CheckBox;
+import android.widget.SeekBar;
+import android.widget.CompoundButton;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.SeekBar.OnSeekBarChangeListener;
+import android.widget.TextView;
+import android.widget.ToggleButton;
+import android.os.Environment;
+
+public class Main extends Activity implements SensorEventListener {
+	
+	private float mLastX, mLastY, mLastZ;
+	private boolean mInitialized; //variable to seenif sensor is is initialized
+	private SensorManager mSensorManager;
+    private Sensor mAccelerometer;
+    private final float NOISE = (float) 0.5;
+    private DebugServer server;
+    private boolean fallen = false;
+    private boolean fallen2 = false;
+    double twosigma = 3, sigma=1.5,th=9.81,th1=6,th2=5,th3=17;
+	public static String curr_state,prev_state;
+    
+	static int BUFF_SIZE=50;
+	static public double[] window = new double[BUFF_SIZE];
+	static public double[] rawwindow = new double[BUFF_SIZE];
+	public float a_norm;
+	public float b_norm;
+	public MediaPlayer m1_jump,m1_fall,m2_sit,m3_stand,m4_walk,m5_run,m6_small;
+	protected PowerManager.WakeLock wl;
+	
+	// Get instance of Vibrator from current Context
+	Vibrator v;
+
+	
+	
+	String current_ip;
+	private boolean isServer = false;
+	private CheckBox serverChkBx;
+	private CheckBox muteChkBx;
+	private EditText ipTextField;
+	private EditText devnameTextField;
+	private SeekBar fallGravityLimit;
+	private SeekBar runThreshold;
+	private SeekBar walkThreshold;
+	private ToggleButton runstopbutton;
+	float vol = 0;
+	private double accelerometerForceLimit = 20;
+	
+	private int fall_timer_delay;
+	private String devicename = Build.MANUFACTURER+"_"+Build.MODEL+"(Tolga)";
+	String old_url = "http://tolgazeybek.ddns.net:8083";
+	
+	
+	 Timer fall_timer;
+	 boolean fall_timer_expired = false;
+
+	
+	 long fall_timer_rate= 4500; 
+	 int computation_delay_constant = 8;
+	 
+	
+    /** Called when the activity is first created. */
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.main);
+        
+        fall_timer = new Timer();
+        setVolumeControlStream(AudioManager.STREAM_MUSIC);
+        //manufacturer specific constants
+        if(Build.MODEL.startsWith("A0001"))  //OnePlus A0001 is a very fast device
+        {
+        	 fall_timer_rate= 3000; 
+        	 computation_delay_constant = 40;
+        	
+        }else if(Build.MODEL.startsWith("XT1045"))  //MotoG
+        {
+             fall_timer_rate= 4500; 
+        	 computation_delay_constant = 8;
+        	
+        }
+        
+        ipTextField = (EditText) findViewById(R.id.editText1);
+    //    ipTextField.setText("http://localhost:8080");
+        ipTextField.setText(old_url);
+        
+        devnameTextField = (EditText) findViewById(R.id.editText2);
+        devnameTextField.setText(devicename);
+        runstopbutton = (ToggleButton) findViewById(R.id.toggleButton1);
+        server = new DebugServer(this);
+        
+        //final Context a = this;
+        
+        PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+    	wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "My Tag");
+        v = (Vibrator) getSystemService(Context.VIBRATOR_SERVICE);
+    	mSensorManager = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+        mAccelerometer = mSensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
+        current_ip = ipTextField.getText().toString(); 
+        devicename = devnameTextField.getText().toString();
+        
+        runThreshold = ( SeekBar ) findViewById( R.id.seekBar2);
+        //Note: Run threshold(th3) is relative to the walk threshold (th2)
+
+        runThreshold.setProgress((int) (runThreshold.getMax()-(th3-th2)));
+        runThreshold.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
+  		  
+    		  @Override
+    		  public void onProgressChanged(SeekBar runThreshold, int progresValue, boolean fromUser) {
+    			th3 = (runThreshold.getMax()-progresValue) + th2;
+              Log.w("Run threshold: ", Double.toString(th3));  			
+    		  }
+
+  		@Override
+  		public void onStartTrackingTouch(SeekBar seekBar) {
+  			// TODO Auto-generated method stub
+  			
+  		}
+
+  		@Override
+  		public void onStopTrackingTouch(SeekBar seekBar) {
+  			// TODO Auto-generated method stub
+  			
+  		}
+    		 
+    	   });
+        
+        walkThreshold = ( SeekBar ) findViewById( R.id.seekBar3);
+        walkThreshold.setProgress((int)(walkThreshold.getMax()- th2));
+        walkThreshold.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
+  		  
+    		  @Override
+    		  public void onProgressChanged(SeekBar walkThreshold, int progresValue, boolean fromUser) {
+    			th2 = walkThreshold.getMax()-progresValue;
+              Log.w("Walk threshold: ", Double.toString(th2));  			
+    		  }
+
+  		@Override
+  		public void onStartTrackingTouch(SeekBar seekBar) {
+  			// TODO Auto-generated method stub
+  			
+  		}
+
+  		@Override
+  		public void onStopTrackingTouch(SeekBar seekBar) {
+  			// TODO Auto-generated method stub
+  			
+  		}
+    		 
+    	   });
+        
+        fallGravityLimit =  ( SeekBar ) findViewById( R.id.seekBar1 );
+        fallGravityLimit.setProgress((int)(fallGravityLimit.getMax()- accelerometerForceLimit));
+        fallGravityLimit.setOnSeekBarChangeListener(new OnSeekBarChangeListener() {
+		  
+  		  @Override
+  		  public void onProgressChanged(SeekBar fallGravityLimit, int progresValue, boolean fromUser) {
+  			accelerometerForceLimit = fallGravityLimit.getMax()-progresValue;
+            Log.w("acc_force_lim", Double.toString(accelerometerForceLimit));  			
+  		  }
+
+		@Override
+		public void onStartTrackingTouch(SeekBar seekBar) {
+			// TODO Auto-generated method stub
+			
+		}
+
+		@Override
+		public void onStopTrackingTouch(SeekBar seekBar) {
+			// TODO Auto-generated method stub
+			
+		}
+  		 
+  	   });
+        
+        
+        serverChkBx = ( CheckBox ) findViewById( R.id.checkBox1 );
+        serverChkBx.setOnClickListener(new OnClickListener() {
+
+            @Override
+            public void onClick(View v) {
+                      //is chkbox checked?
+              if (((CheckBox) v).isChecked()) {
+                               //I am a server
+            	  isServer = true;
+            	  old_url = ipTextField.getText().toString();
+            	  ipTextField.setText("http://localhost:8080");
+            	  ipTextField.setEnabled(false);
+            	  //TODO: buraya debugserver initialization kodu koy, sonra da ip addresini text fielddan al, eger serversan ignore edip localhost:8080ye cevir burada
+            	  //sonra da http client exampleiyle POST requestlerini dose. Hadi masallah
+              }
+              else
+              {//I am a humble client
+                  //case 2
+            	  isServer = false;
+            	  ipTextField.setText(old_url);
+                  ipTextField.setEnabled(true);
+              }
+            }
+          });
+        
+        muteChkBx = ( CheckBox ) findViewById( R.id.muteCheckBox );
+        muteChkBx.setOnClickListener(new OnClickListener() {
+
+            @Override
+            public void onClick(View v) {
+                      //is chkbox checked?
+              if (((CheckBox) v).isChecked()) {                              
+                  vol = 0.4F;
+              }
+              else
+              {
+            	  vol = 0;
+              }
+              m1_jump.setVolume(vol, vol);
+              m1_fall.setVolume(vol, vol);
+              m2_sit.setVolume(vol, vol);
+              m3_stand.setVolume(vol, vol);
+              m4_walk.setVolume(vol, vol);
+              m5_run.setVolume(vol, vol);
+              m6_small.setVolume(vol/2, vol/2);
+            }
+          });
+        
+        
+        runstopbutton.setOnClickListener(new OnClickListener() {
+        	 
+    		@Override
+    		public void onClick(View v) {
+                
+    			
+    		   if(runstopbutton.getText().toString().equalsIgnoreCase("STOP")) //User wants to start the functionality   
+    		   {
+    			   if(isServer)
+    			   {
+    			   server = new DebugServer(Main.this);
+	    			   try{
+	    				   
+	    				   try {
+	    			            server.start();
+	    			        } catch(IOException ioe) {
+	    			            Log.w("Httpd", "The server could not start.");
+	    			        }
+	    			        Log.w("Httpd", "Web server initialized.");
+	    			   
+	    			   
+	    				   
+	    			   }catch(Exception e)
+	    			   {
+	    				   if(wl.isHeld())wl.release();
+	    			       
+	    			       if (server != null)
+	    			       server.stop();  
+	    				   runstopbutton.toggle();
+	    				   serverChkBx.setEnabled(true);
+	        			   ipTextField.setEnabled(true);
+	        			   devnameTextField.setEnabled(true);
+	    				   // mSensorManager.unregisterListener(Main.this);
+	    			   }
+    			   }
+    			   wl.acquire();
+    			   mSensorManager.registerListener(Main.this, mAccelerometer , SensorManager.SENSOR_DELAY_GAME); 
+    			   current_ip = ipTextField.getText().toString();
+    			   devicename = devnameTextField.getText().toString();
+    			   serverChkBx.setEnabled(false);
+    			   ipTextField.setEnabled(false);
+    			   devnameTextField.setEnabled(false);
+    			   HttpClient client = new DefaultHttpClient();
+    			   HttpPost post = new HttpPost(current_ip ); //just for now
+    			        
+    			   
+    			   
+    			   
+    		   }
+    		   else if(runstopbutton.getText().toString().equalsIgnoreCase("RUN")) //User wants to stop the functionality
+    		   {
+    			   if(wl.isHeld()) wl.release();
+    			   mSensorManager.unregisterListener(Main.this);
+			       if (server != null) server.stop();
+			       serverChkBx.setEnabled(true);
+    			   ipTextField.setEnabled(true);
+    			   devnameTextField.setEnabled(true);
+    		   }
+    		}
+     
+    	});
+        
+        
+        
+        
+        
+        
+        prev_state="none";
+		curr_state="none";
+
+
+      
+        mInitialized = false;
+        
+        m1_jump=MediaPlayer.create(getBaseContext(), R.raw.jump);
+        m1_fall=MediaPlayer.create(getBaseContext(), R.raw.fall2);
+        m2_sit=MediaPlayer.create(getBaseContext(), R.raw.sitting2);
+        m3_stand=MediaPlayer.create(getBaseContext(), R.raw.standing2);
+        m4_walk=MediaPlayer.create(getBaseContext(), R.raw.walking2);
+        m5_run=MediaPlayer.create(getBaseContext(), R.raw.running);
+        m6_small=MediaPlayer.create(getBaseContext(), R.raw.small);
+        m1_jump.setVolume(vol, vol);
+        m1_fall.setVolume(vol, vol);
+        m2_sit.setVolume(vol, vol);
+        m3_stand.setVolume(vol, vol);
+        m4_walk.setVolume(vol, vol);
+        m5_run.setVolume(vol, vol);
+        m6_small.setVolume(vol, vol);
+      //as http client
+      //  HttpClient client = new DefaultHttpClient();
+      //  HttpPost post = new HttpPost("www.google.com"); //just for now
+        
+      //as http server using nanohttpd
+    
+    }
+    
+ // DON'T FORGET to stop the server
+    @Override
+    public void onDestroy()
+    {
+        super.onDestroy();
+    	if(wl.isHeld())wl.release();
+        mSensorManager.unregisterListener(this);
+        if (server != null)
+            server.stop();
+    }
+
+    @Override
+	protected void onResume() {
+        super.onResume();
+      //  mSensorManager.registerListener(this, mAccelerometer, SensorManager.SENSOR_DELAY_NORMAL);
+    }
+
+    @Override
+	protected void onPause() {
+        super.onPause();
+       // mSensorManager.unregisterListener(this);
+    }
+
+	@Override
+	public void onAccuracyChanged(Sensor sensor, int accuracy) {
+		// can be safely ignored for this demo
+	}
+	
+
+	
+	
+	private void AddData(float ax, float ay, float az, float bx, float by, float bz) {
+		// TODO Auto-generated method stub
+		 a_norm=(float) Math.sqrt(ax*ax+ay*ay+az*az);
+		 b_norm=(float) Math.sqrt(bx*bx+by*by+bz*bz);
+		 for(int i=0;i<=BUFF_SIZE-2;i++){
+	    	window[i]=window[i+1];
+	    	rawwindow[i]=rawwindow[i+1];
+	     }
+	     window[BUFF_SIZE-1]=a_norm;
+	     rawwindow[BUFF_SIZE-1]=b_norm;
+	       
+	}
+
+	private int compute_zrc(double[] window2) {
+		// TODO Auto-generated method stub
+		int count=0;
+		for(int i=1;i<=BUFF_SIZE-1;i++){
+			
+			if((window2[i]-th)<sigma && (window2[i-1]-th)>sigma){
+				count=count+2;
+			}
+			
+			if((window2[i]-th)<twosigma && (window2[i-1]-th)>twosigma){
+				count=count+3;
+			}
+			
+		}
+		return count;
+	}
+	
+	
+	private double potential_fall(double[] window2)
+	{
+		double min = 20;
+		double max = 0;
+		int min_loc = 0;
+		int max_loc = 0;
+		for(int i=1;i<=BUFF_SIZE-1;i++){
+			
+			if(window2[i] > max) 
+				{
+				  max = window2[i];
+				}
+			if(window2[i] < min)
+				{min = window2[i];	
+				  min_loc = i;
+				}
+			
+		}
+		return max-min;
+	}
+	
+	
+	private double potential_rawfall(double[] window2)
+	{
+		double min = 20;
+		double max = 0;
+		double gravity =9.81;
+		
+		int min_loc = 0;
+		int max_loc = 0;
+		int grav_stat = 0;
+		for(int i=1;i<=BUFF_SIZE-1;i++){
+			
+			if((window2[i] +4) < gravity) 
+				{
+				  grav_stat = 1;
+				}
+			if(grav_stat == 1)
+			{
+				if((window2[i] -12) > gravity) 
+				  grav_stat = 2;
+			}
+			if(grav_stat == 2)
+			{
+				if((window2[i] > gravity -2) || (window2[i] < gravity +2))
+						grav_stat = 3;
+			}
+			
+		}
+		return grav_stat;
+	}
+	 
+	private int walk_detect_num = 0;
+	private double th1_bufzone = 1;
+	String possible_state = "";
+	private void posture_recognition(double[] window2,double ay2) {
+		// TODO Auto-generated method stub
+		int zrc=compute_zrc(window2);
+		if(zrc==0){
+			walk_detect_num = 0;
+			if(Math.abs(ay2)<th1){
+				possible_state="sitting";
+			}else if(Math.abs(ay2)>=th1){
+				possible_state="standing";
+			}
+				
+		}else{
+			if(zrc>th3) possible_state="running";
+		    else if(zrc>th2){
+		    // 	walk_detect_num++;
+		    // 	if(walk_detect_num > 1)//may be needed for now
+			//	  {//double, triple, or quadruple check if walking
+		    		possible_state="walking";
+		    //		walk_detect_num = 0;
+			//	  }
+			}else{
+				possible_state="small+motion";
+				
+			//TODO: As a trial basis
+				//curr_state=prev_state;
+				
+			}
+			
+			
+				
+				
+		}
+			
+		
+		
+	}
+	
+
+	private void SystemState(String curr_state1,String prev_state1) {
+		// TODO Auto-generated method stub
+	//	    if(prev_state1.equalsIgnoreCase("none")) prev_state1 = last_known_good_state;
+	        	//Fall !!
+	     	if(!prev_state1.equalsIgnoreCase(curr_state1)){
+	     		  Log.e("Current_state",curr_state1);
+            	  if(curr_state1.equalsIgnoreCase("fall")){
+            		  m1_fall.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 50;
+            	  }
+            	  if(curr_state1.equalsIgnoreCase("jumping")){
+            		  m1_jump.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 20;
+            	  }
+            	  else if(curr_state1.equalsIgnoreCase("sitting")){
+            		  m2_sit.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 1;
+            	  }
+            	  else if(curr_state1.equalsIgnoreCase("standing")){
+            		  m3_stand.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 1;
+            	  }
+            	  else if(curr_state1.equalsIgnoreCase("small+motion")){
+            		  m6_small.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 1;
+            	  }
+            	  
+            	  else if(curr_state1.equalsIgnoreCase("walking")){
+            		  //if(!prev_state1.equalsIgnoreCase("running"))
+            		  //{
+            		  m4_walk.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		    
+            		  //}
+            		  fall_timer_delay = 20;
+            	  }
+            	  else if(curr_state1.equalsIgnoreCase("running")){
+            		  m5_run.start();
+            		  String[] param = {current_ip,devicename,curr_state1};
+            		  new SendHttpRequestTask().execute(param);
+            		  fall_timer_delay = 20;
+            	  }
+             }	
+	 	 
+	 	
+	}
+	
+	    private int fall_prob_timer = 0;
+	    private int fall_prob = 0;
+	    
+		private int computation_delay = computation_delay_constant;
+//	    private String last_known_good_state = "none";	
+	@Override
+	
+	public void onSensorChanged(SensorEvent event) {
+	  if(fall_timer_delay > 0) fall_timer_delay--;
+	  
+		TextView tvX=  (TextView)findViewById(R.id.x_axis);
+		TextView tvY= (TextView)findViewById(R.id.y_axis);
+		TextView tvZ= (TextView)findViewById(R.id.z_axis);
+	//	ImageView iv = (ImageView)findViewById(R.id.image);
+	//	AnalogClock clk = (AnalogClock)findViewById(R.id.analogClock1);
+		float x = event.values[0];
+		float y = event.values[1];
+		float z = event.values[2];
+		if (!mInitialized) {
+			mLastX = x;
+			mLastY = y;
+			mLastZ = z;
+			tvX.setText("0.0");
+			tvY.setText("0.0");
+			tvZ.setText("0.0");
+			mInitialized = true;
+	//		clk.setVisibility(View.VISIBLE);
+	//		clk.bringToFront();
+		} else {
+			float deltaX = Math.abs(mLastX - x);
+			float deltaY = Math.abs(mLastY - y);
+			float deltaZ = Math.abs(mLastZ - z);
+			if (deltaX < NOISE) deltaX = (float)0.0;
+			if (deltaY < NOISE) deltaY = (float)0.0;
+			if (deltaZ < NOISE) deltaZ = (float)0.0;
+			AddData(deltaX,deltaY,deltaZ,x,y,z);
+			mLastX = x;
+			mLastY = y;
+			mLastZ = z;
+			tvX.setText(Float.toString(deltaX));
+			tvY.setText(Float.toString(deltaY));
+			tvZ.setText(Float.toString(deltaZ));
+	//		clk.setVisibility(View.VISIBLE);
+	//		clk.bringToFront();
+			
+			
+	      computation_delay--;
+			
+		if(fall_timer_delay < 1 && computation_delay < 1) 
+		{		
+			computation_delay = computation_delay_constant;
+			//TODO: computation delay of 8 works fine for MotoG
+			//       15 is fine for oneplusone 
+			double maxaccelerometerforce = potential_fall(window);
+			double rawfall = potential_rawfall(rawwindow);
+			
+			posture_recognition(rawwindow,y);
+            
+			int vibraduration = 0;
+		    fall_prob = 0;
+			if(maxaccelerometerforce > accelerometerForceLimit)
+			{
+				if(!fallen)
+				{
+					fall_prob+= 60;
+					// Vibrate for 400 milliseconds
+					vibraduration+=500;
+					Log.e("fallrelated","BIGFALL");
+				}
+				fallen = true;
+			}else
+			{
+				fallen = false;
+				
+			}
+			
+			if(rawfall > 2)
+			{
+				if(!fallen2)
+				{
+					fall_prob+=40;
+					// Vibrate for 400 milliseconds
+					vibraduration+=100;
+					Log.e("fallrelated","SMALLFALL");
+				}
+				fallen2 = true;
+			}else
+			{
+				fallen2 = false;
+				
+			}
+			v.vibrate(vibraduration);
+			if(fall_prob>0)
+			{
+				fall_prob_timer = fall_prob;				
+			}
+			
+			
+			if(fall_prob_timer > 59){ //make it >60 to use bigfall && smallfall together
+		     fall_prob_timer = 0;
+		     fall_timer.schedule(new TimerTask() {
+
+		            @Override
+		            public void run() {
+		                // TODO Auto-generated method stub
+		                runOnUiThread(new Runnable() {
+		                    public void run() {
+		                    	fall_timer_expired =true;
+		                    	
+		                    }
+		                });
+
+		            }
+		        }, fall_timer_rate); // 1000 means start from 1 sec
+		    }
+			if(fall_timer_expired)//fall_prob_timer > 0)
+			{ fall_timer_expired = false;
+			    Log.w("Fallcheck", "fall check started"); 
+			    Log.w("Fallcheck", possible_state); 
+				if(possible_state.equalsIgnoreCase("walking")||possible_state.equalsIgnoreCase("running"))
+				{
+					fall_prob_timer += 7;
+					
+				}else if(possible_state.equalsIgnoreCase("standing"))
+				{
+					possible_state = "jumping";
+					fall_prob_timer = 1;
+				}else if(possible_state.equalsIgnoreCase("sitting"))
+				{
+					possible_state = "FALL";
+					fall_prob_timer = 1;
+				}
+				else if(possible_state.equalsIgnoreCase("small+motion"))
+				{
+					possible_state = "fall";
+					fall_prob_timer = 1;
+				}
+				
+				if(fall_prob_timer < 8) fall_prob_timer=0;
+				else fall_prob_timer-=8;
+			}
+			
+		//	if(!prev_state.equalsIgnoreCase("none")) last_known_good_state = prev_state;
+		//	if(!curr_state.equalsIgnoreCase("none")) last_known_good_state = curr_state;
+			curr_state = possible_state;
+			SystemState(curr_state,prev_state);
+			 if(!prev_state.equalsIgnoreCase(curr_state)){
+	            	prev_state=curr_state;
+	            }
+	      } 
+		
+		
+	
+		}
+	  
+	}
+	
+	
+	
+	//----------------------***********************************************_________________________________________
+	//http client stuff here:
+	String sendHttpRequest(String url, String devicename, String status)
+	{
+		
+		StringBuilder returnstring = new StringBuilder();
+		
+		StringBuilder design_url = new StringBuilder();
+		
+		try{
+	    design_url.append(url).append("/?devicename=").append(devicename).append("&status=").append(status);
+		HttpURLConnection con = (HttpURLConnection) ( new URL(design_url.toString())).openConnection();
+		con.setRequestMethod("POST");
+		con.setDoInput(true);
+		con.setDoOutput(true);
+		con.connect();
+		InputStream is = con.getInputStream();
+		byte[] b = new byte[2];
+		while ( is.read(b) != -1)
+		{
+		  returnstring.append(new String(b));
+		  Log.w("inputstream",returnstring.toString());
+		}
+		con.disconnect();
+		}catch(Exception e)
+		{;
+		
+		}
+		return returnstring.toString();
+	}
+	
+	//inner class
+	private class SendHttpRequestTask extends AsyncTask<String, Void, String>{
+		   
+		  @Override
+		  protected String doInBackground(String... params) {
+		   String url = params[0];
+		   String name = params[1];
+		   String status = params[2];
+		   String data = sendHttpRequest(url, name, status);
+		   return data;
+		  }
+		 
+		  @Override
+		  protected void onPostExecute(String result) {
+		   ;
+		  }
+		}
+	
+	
+	
+}

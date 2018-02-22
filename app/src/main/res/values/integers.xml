@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <integer name="raw_gravity_step">1</integer>
+    <integer name="raw_gravity_max">40</integer>
+    <integer name="raw_gravity_default">19</integer>
+    <integer name="walk_thres_max">12</integer>
+    <integer name="run_thres_max">25</integer>
+    <integer name="raw_gravity_max2">50</integer>
+</resources>
